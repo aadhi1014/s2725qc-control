@@ -3,46 +3,71 @@ import CoreAudio
 import Foundation
 
 let virtualUID = "S2725QC_UID"
-let monitorModel = "S2725QC"
 
-let writer = DDCWriter()
-var bridge: Bridge?
+/// Everything attached to one connected monitor. Main thread only.
+final class ConnectedMonitor {
+    let monitor: Monitor
+    let label: String
+    let writer: DDCWriter
+    let brightness: MonitorBrightness
+    let bridge: Bridge?
+
+    init(monitor: Monitor, label: String, channel: DDPMChannel, virtual: AudioObjectID?) {
+        self.monitor = monitor
+        self.label = label
+        writer = DDCWriter(display: monitor.ddc)
+        brightness = MonitorBrightness(writer: writer)
+        if let virtual, let audio = monitor.audioDevice {
+            bridge = Bridge(dell: audio, virtual: virtual, channel: channel)
+        } else {
+            bridge = nil
+        }
+    }
+
+    func destroy() {
+        bridge?.destroy()
+        writer.stop()
+    }
+}
+
+var connected: [ConnectedMonitor] = []
+var connectedSignature = ""
 var mirror: VolumeMirror?
+var playbackListenerInstalled = false
 var idleSince: Date?
 var idleTimer: DispatchSourceTimer?
 
-/// Runs the bridge only while some app is playing to the virtual device.
+/// Runs the monitor bridges only while some app is playing to the virtual device.
 func updatePlayback() {
-    guard let bridge, let virtual = HAL.device(uid: virtualUID) else {
+    let bridges = connected.compactMap(\.bridge)
+    guard !bridges.isEmpty, let virtual = HAL.device(uid: virtualUID) else {
         idleTimer?.cancel()
         idleTimer = nil
         return
     }
+    let wasRunning = bridges.contains { $0.isRunning }
+    var run = wasRunning
     if HAL.othersPlaying(to: virtual) {
         idleSince = nil
-        bridge.setRunning(true)
-    } else if bridge.isRunning {
+        run = true
+    } else if wasRunning {
         let since = idleSince ?? Date()
         idleSince = since
-        if Date().timeIntervalSince(since) >= 3 { bridge.setRunning(false) }
+        if Date().timeIntervalSince(since) >= 3 { run = false }
     }
+    for bridge in bridges { bridge.setRunning(run) }
+    if run != wasRunning { log(run ? "audio bridges started" : "audio bridges idle") }
+
     // Poll for the end of playback only while running; starts are event-driven.
-    if bridge.isRunning, idleTimer == nil {
+    if run, idleTimer == nil {
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(200))
         timer.setEventHandler(handler: updatePlayback)
         timer.resume()
         idleTimer = timer
-    } else if !bridge.isRunning {
+    } else if !run {
         idleTimer?.cancel()
         idleTimer = nil
-    }
-}
-
-func findMonitorAudio() -> AudioObjectID? {
-    HAL.devices().first {
-        HAL.transportType($0) == kAudioDeviceTransportTypeDisplayPort
-            && (HAL.string($0, kAudioObjectPropertyName) ?? "").contains(monitorModel)
     }
 }
 
@@ -52,51 +77,70 @@ func findBuiltInSpeakers() -> AudioObjectID? {
     }
 }
 
-/// Idempotent: called at launch and whenever devices or the default output change.
+/// With several monitors side by side, the leftmost plays the left channel and the
+/// rightmost the right channel; a single (or middle) monitor plays stereo.
+func channelAndLabel(index: Int, count: Int) -> (DDPMChannel, String) {
+    if count == 1 { return (DDPMChannelStereo, "Monitor") }
+    if index == 0 { return (DDPMChannelLeft, "Left") }
+    if index == count - 1 { return (DDPMChannelRight, "Right") }
+    return (DDPMChannelStereo, "Middle \(index)")
+}
+
+/// Idempotent: called at launch and whenever devices, the default output or the display arrangement change.
 func reconcile() {
     let virtual = HAL.device(uid: virtualUID)
-    let monitor = findMonitorAudio()
+    if virtual == nil { log("virtual device \(virtualUID) not installed") }
+    let monitors = Monitor.discover()
 
-    guard let virtual, let monitor else {
-        bridge?.destroy(); bridge = nil
-        mirror?.stop(); mirror = nil
-        updatePlayback()
-        // Monitor unplugged: don't leave the system routed into a dead virtual device.
-        if let virtual, HAL.defaultOutput == virtual, let speakers = findBuiltInSpeakers() {
-            HAL.setDefaultOutput(speakers)
+    // Rebuild only when the set of monitors, their audio devices or their left-to-right order changed.
+    let signature = monitors.map { "\($0.port)/\($0.audioDevice ?? 0)/\($0.displayID ?? 0)" }.joined(separator: ",")
+        + "|\(virtual ?? 0)"
+    if signature != connectedSignature {
+        connectedSignature = signature
+        connected.forEach { $0.destroy() }
+        connected = monitors.enumerated().map { index, monitor in
+            let (channel, label) = channelAndLabel(index: index, count: monitors.count)
+            return ConnectedMonitor(monitor: monitor, label: label, channel: channel, virtual: virtual)
         }
-        if virtual == nil { log("virtual device \(virtualUID) not installed") }
-        return
+        log("monitors: " + (connected.isEmpty ? "none" : connected.map {
+            "\($0.label)=\($0.monitor.port)\($0.bridge == nil ? " (no audio)" : "")"
+        }.joined(separator: ", ")))
+        if let virtual, mirror == nil { mirror = VolumeMirror(device: virtual) }
+        mirror?.setWriters(connected.map(\.writer))
+        menuBar?.update(monitors: connected)
     }
 
-    if bridge?.dell != monitor {
-        bridge?.destroy()
-        bridge = Bridge(dell: monitor, virtual: virtual)
+    guard let virtual else { return }
+    if !playbackListenerInstalled {
         var addr = HAL.address(kAudioDevicePropertyDeviceIsRunningSomewhere)
         AudioObjectAddPropertyListenerBlock(virtual, &addr, .main) { _, _ in updatePlayback() }
+        playbackListenerInstalled = true
     }
-    if mirror == nil {
-        mirror = VolumeMirror(device: virtual, writer: writer)
-    }
-    // When macOS picks the monitor's raw (volume-less) output, route through the virtual device instead.
-    if HAL.defaultOutput == monitor {
+
+    let monitorAudio = connected.compactMap(\.monitor.audioDevice)
+    if monitorAudio.isEmpty {
+        // Monitors unplugged: don't leave the system routed into a dead virtual device.
+        if HAL.defaultOutput == virtual, let speakers = findBuiltInSpeakers() {
+            HAL.setDefaultOutput(speakers)
+        }
+    } else if let current = HAL.defaultOutput, monitorAudio.contains(current) {
+        // macOS picked a monitor's raw (volume-less) output: route through the virtual device instead.
         HAL.setDefaultOutput(virtual)
         log("default output -> \(HAL.string(virtual, kAudioObjectPropertyName) ?? virtualUID)")
     }
     updatePlayback()
 }
 
-/// Hands the output back to the monitor's raw device so audio keeps working without the agent.
+/// Hands the output back to a monitor's raw device so audio keeps working without the agent.
 func restoreOutput() {
-    if let virtual = HAL.device(uid: virtualUID), HAL.defaultOutput == virtual, let monitor = findMonitorAudio() {
+    if let virtual = HAL.device(uid: virtualUID), HAL.defaultOutput == virtual,
+       let monitor = connected.first(where: { $0.monitor.audioDevice != nil })?.monitor.audioDevice {
         HAL.setDefaultOutput(monitor)
     }
-    bridge?.destroy()
-    bridge = nil
+    connected.forEach { $0.bridge?.destroy() }
 }
 
 var signalSources: [DispatchSourceSignal] = []
-var brightness: MonitorBrightness?
 var mediaKeys: MediaKeys?
 var menuBar: MenuBar?
 
@@ -122,10 +166,14 @@ public func agentMain() {
     NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
         restoreOutput()
     }
-    let shared = MonitorBrightness(writer: writer)
-    brightness = shared
-    mediaKeys = MediaKeys(brightness: shared, virtualUID: virtualUID)
-    menuBar = MenuBar(brightness: shared, virtualUID: virtualUID)
+    // Monitors plugged in, unplugged or rearranged in System Settings > Displays.
+    NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in
+        reconcile()
+    }
+    mediaKeys = MediaKeys(virtualUID: virtualUID) { display in
+        connected.first { $0.monitor.displayID == display }?.brightness
+    }
+    menuBar = MenuBar(virtualUID: virtualUID)
     reconcile()
     app.run()
 }

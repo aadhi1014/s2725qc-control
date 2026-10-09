@@ -1,6 +1,6 @@
 import Foundation
 
-/// Sends values to the monitor over DDC/CI on a dedicated thread.
+/// Sends values to one monitor over DDC/CI on a dedicated thread.
 /// Only the latest requested value per control is written, so holding a key or
 /// dragging a slider never queues up lag.
 final class DDCWriter {
@@ -9,8 +9,13 @@ final class DDCWriter {
     private var lastWritten: [VCP: UInt16] = [:]
     private let wake = DispatchSemaphore(value: 0)
     private var display: DDCDisplay?
+    private var stopped = false
+    /// Display coprocessor port of the monitor ("dispextN"); used to find it again after a reconnect.
+    let port: String
 
-    init() {
+    init(display: DDCDisplay) {
+        self.display = display
+        self.port = display.port
         let thread = Thread { [unowned self] in self.run() }
         thread.qualityOfService = .userInteractive
         thread.start()
@@ -33,13 +38,21 @@ final class DDCWriter {
 
     private func currentDisplay() -> DDCDisplay? {
         lock.lock(); defer { lock.unlock() }
-        if display == nil { display = DDCDisplay.externalDisplays().first }
+        if display == nil { display = DDCDisplay.externalDisplays().first { $0.port == port } }
         return display
+    }
+
+    /// Ends the writer thread (after any pending write) once the monitor is gone or replaced.
+    func stop() {
+        lock.lock(); stopped = true; lock.unlock()
+        wake.signal()
     }
 
     private func run() {
         while true {
             wake.wait()
+            lock.lock(); let done = stopped && pending.isEmpty; lock.unlock()
+            if done { return }
             while true {
                 lock.lock()
                 guard let (code, value) = pending.first else { lock.unlock(); break }
@@ -50,7 +63,7 @@ final class DDCWriter {
                 if let display = currentDisplay(), display.write(code, value) {
                     lock.lock(); lastWritten[code] = value; lock.unlock()
                 } else {
-                    log("DDC write failed; will rediscover display")
+                    log("DDC write to \(port) failed; will rediscover display")
                     lock.lock(); display = nil; lock.unlock()
                 }
             }

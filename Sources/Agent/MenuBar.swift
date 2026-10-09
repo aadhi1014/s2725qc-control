@@ -1,40 +1,55 @@
 import AppKit
 import CoreAudio
 
-/// Menu bar item with brightness and volume sliders for the monitor.
+/// Menu bar item with a brightness slider per monitor and one volume slider for all of them.
 final class MenuBar: NSObject, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-    private let brightness: MonitorBrightness
     private let virtualUID: String
-    private let brightnessSlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let menu = NSMenu()
+    private var monitors: [ConnectedMonitor] = []
+    private var brightnessSliders: [NSSlider] = []
     private let volumeSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let volumeAddr = HAL.address(kAudioDevicePropertyVolumeScalar, kAudioObjectPropertyScopeOutput)
     private let muteAddr = HAL.address(kAudioDevicePropertyMute, kAudioObjectPropertyScopeOutput)
 
-    init(brightness: MonitorBrightness, virtualUID: String) {
-        self.brightness = brightness
+    init(virtualUID: String) {
         self.virtualUID = virtualUID
         super.init()
-
         item.button?.image = NSImage(systemSymbolName: "display", accessibilityDescription: "S2725QC")
-
-        let menu = NSMenu()
         menu.delegate = self
-        menu.addItem(sectionHeader("DELL S2725QC"))
-        menu.addItem(sliderRow(brightnessSlider, symbol: "sun.max.fill", action: #selector(brightnessChanged)))
-        menu.addItem(sliderRow(volumeSlider, symbol: "speaker.wave.2.fill", action: #selector(volumeChanged)))
+        item.menu = menu
+        update(monitors: [])
+    }
+
+    /// Rebuilds the menu for the currently connected monitors (left to right).
+    func update(monitors: [ConnectedMonitor]) {
+        self.monitors = monitors
+        menu.removeAllItems()
+        brightnessSliders = []
+
+        menu.addItem(sectionHeader(monitors.isEmpty ? "No DDC monitor connected" : "Brightness"))
+        for (index, monitor) in monitors.enumerated() {
+            let slider = NSSlider(value: Double(monitor.brightness.value), minValue: 0, maxValue: 1, target: nil, action: nil)
+            slider.tag = index
+            brightnessSliders.append(slider)
+            monitor.brightness.onChange = { value in slider.doubleValue = Double(value) }
+            menu.addItem(sliderRow(slider, symbol: "sun.max.fill",
+                                   label: monitors.count > 1 ? monitor.label : nil, action: #selector(brightnessChanged)))
+        }
+        if !monitors.isEmpty {
+            menu.addItem(sectionHeader(monitors.count > 1 ? "Volume (all monitors)" : "Volume"))
+            menu.addItem(sliderRow(volumeSlider, symbol: "speaker.wave.2.fill", label: nil, action: #selector(volumeChanged)))
+        }
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit S2725QC Control", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        item.menu = menu
-
-        brightnessSlider.doubleValue = Double(brightness.value)
-        brightness.onChange = { [weak self] value in self?.brightnessSlider.doubleValue = Double(value) }
     }
 
     private var virtualDevice: AudioObjectID? { HAL.device(uid: virtualUID) }
 
     func menuWillOpen(_ menu: NSMenu) {
-        brightnessSlider.doubleValue = Double(brightness.value)
+        for (slider, monitor) in zip(brightnessSliders, monitors) {
+            slider.doubleValue = Double(monitor.brightness.value)
+        }
         if let device = virtualDevice {
             let muted = (HAL.get(device, muteAddr, UInt32(0)) ?? 0) != 0
             volumeSlider.doubleValue = muted ? 0 : Double(HAL.get(device, volumeAddr, Float32(0)) ?? 0)
@@ -45,7 +60,8 @@ final class MenuBar: NSObject, NSMenuDelegate {
     }
 
     @objc private func brightnessChanged(_ sender: NSSlider) {
-        brightness.set(Self.snapped(sender.floatValue))
+        guard monitors.indices.contains(sender.tag) else { return }
+        monitors[sender.tag].brightness.set(Self.snapped(sender.floatValue))
     }
 
     @objc private func volumeChanged(_ sender: NSSlider) {
@@ -65,19 +81,30 @@ final class MenuBar: NSObject, NSMenuDelegate {
         return item
     }
 
-    private func sliderRow(_ slider: NSSlider, symbol: String, action: Selector) -> NSMenuItem {
+    private func sliderRow(_ slider: NSSlider, symbol: String, label: String?, action: Selector) -> NSMenuItem {
         slider.target = self
         slider.action = action
         slider.isContinuous = true
         slider.controlSize = .regular
 
+        var views: [NSView] = []
         let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!)
         icon.contentTintColor = .secondaryLabelColor
-        let row = NSStackView(views: [icon, slider])
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        views.append(icon)
+        if let label {
+            let text = NSTextField(labelWithString: label)
+            text.textColor = .secondaryLabelColor
+            text.font = .menuFont(ofSize: 0)
+            text.widthAnchor.constraint(equalToConstant: 38).isActive = true
+            views.append(text)
+        }
+        views.append(slider)
+
+        let row = NSStackView(views: views)
         row.spacing = 8
         row.edgeInsets = NSEdgeInsets(top: 4, left: 14, bottom: 4, right: 14)
-        row.frame = NSRect(x: 0, y: 0, width: 260, height: 30)
-        icon.setContentHuggingPriority(.required, for: .horizontal)
+        row.frame = NSRect(x: 0, y: 0, width: 280, height: 30)
 
         let item = NSMenuItem()
         item.view = row

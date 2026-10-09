@@ -7,6 +7,8 @@ import CoreGraphics
 func IOAVServiceCreateWithService(_ allocator: CFAllocator?, _ service: io_service_t) -> Unmanaged<CFTypeRef>?
 @_silgen_name("IOAVServiceReadI2C")
 func IOAVServiceReadI2C(_ service: CFTypeRef, _ chipAddress: UInt32, _ offset: UInt32, _ outputBuffer: UnsafeMutableRawPointer, _ outputBufferSize: UInt32) -> IOReturn
+@_silgen_name("IOAVServiceCopyEDID")
+func IOAVServiceCopyEDID(_ service: CFTypeRef, _ edid: UnsafeMutablePointer<Unmanaged<CFData>?>) -> IOReturn
 @_silgen_name("IOAVServiceWriteI2C")
 func IOAVServiceWriteI2C(_ service: CFTypeRef, _ chipAddress: UInt32, _ dataAddress: UInt32, _ inputBuffer: UnsafeMutableRawPointer, _ inputBufferSize: UInt32) -> IOReturn
 
@@ -19,11 +21,24 @@ enum VCP: UInt8 {
 
 final class DDCDisplay {
     let service: CFTypeRef
-    let name: String
+    /// Display coprocessor port, e.g. "dispext0". Shared with the monitor's DisplayPort audio driver.
+    let port: String
+    /// EDID serial number; matches CGDisplaySerialNumber.
+    let edidSerial: UInt32
 
-    init(service: CFTypeRef, name: String) {
+    init(service: CFTypeRef, port: String, edidSerial: UInt32) {
         self.service = service
-        self.name = name
+        self.port = port
+        self.edidSerial = edidSerial
+    }
+
+    /// Extracts the "dispextN" port from an IORegistry path.
+    static func port(ofRegistryEntry entry: io_registry_entry_t) -> String? {
+        var buffer = [CChar](repeating: 0, count: 1024)
+        guard IORegistryEntryGetPath(entry, kIOServicePlane, &buffer) == KERN_SUCCESS else { return nil }
+        let path = String(cString: buffer)
+        guard let range = path.range(of: #"dispext\d+"#, options: .regularExpression) else { return nil }
+        return String(path[range])
     }
 
     /// Finds external displays that expose an IOAVService (DCPAVServiceProxy with Location=External).
@@ -35,11 +50,16 @@ final class DDCDisplay {
         while case let entry = IOIteratorNext(iterator), entry != 0 {
             defer { IOObjectRelease(entry) }
             let location = IORegistryEntryCreateCFProperty(entry, "Location" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String
-            guard location == "External",
+            guard location == "External", let port = port(ofRegistryEntry: entry),
                   let av = IOAVServiceCreateWithService(kCFAllocatorDefault, entry)?.takeRetainedValue() else { continue }
-            result.append(DDCDisplay(service: av, name: "External \(result.count + 1)"))
+            var serial: UInt32 = 0
+            var edid: Unmanaged<CFData>?
+            if IOAVServiceCopyEDID(av, &edid) == kIOReturnSuccess, let data = edid?.takeRetainedValue() as Data?, data.count >= 16 {
+                serial = UInt32(data[12]) | UInt32(data[13]) << 8 | UInt32(data[14]) << 16 | UInt32(data[15]) << 24
+            }
+            result.append(DDCDisplay(service: av, port: port, edidSerial: serial))
         }
-        return result
+        return result.sorted { $0.port < $1.port }
     }
 
     private static let chip: UInt32 = 0x37

@@ -5,14 +5,14 @@ import CoreAudio
 /// Intercepts the volume and brightness keys: volume moves in 2% steps, brightness in
 /// macOS's own 1/16 steps (1/64 with Shift+Option).
 /// - volume/mute keys, while the S2725QC virtual device is the default output;
-/// - brightness keys, while the mouse pointer is on the external monitor.
+/// - brightness keys, for the external monitor under the mouse pointer.
 /// Anything else passes through to macOS untouched.
 final class MediaKeys {
     static let step: Float32 = 0.02
     static let brightnessStep: Float32 = 1.0 / 16
     static let fineBrightnessStep: Float32 = 1.0 / 64
 
-    private let brightness: MonitorBrightness
+    private let brightnessFor: (CGDirectDisplayID) -> MonitorBrightness?
     private let virtualUID: String
     private var tap: CFMachPort?
 
@@ -21,8 +21,8 @@ final class MediaKeys {
         case soundUp = 0, soundDown = 1, brightnessUp = 2, brightnessDown = 3, mute = 7
     }
 
-    init(brightness: MonitorBrightness, virtualUID: String) {
-        self.brightness = brightness
+    init(virtualUID: String, brightnessFor: @escaping (CGDirectDisplayID) -> MonitorBrightness?) {
+        self.brightnessFor = brightnessFor
         self.virtualUID = virtualUID
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         if !AXIsProcessTrustedWithOptions(options) {
@@ -103,7 +103,7 @@ final class MediaKeys {
 
     private func handleBrightness(up: Bool, isDown: Bool, fine: Bool) -> Bool {
         let display = OSD.displayUnderCursor
-        guard CGDisplayIsBuiltin(display) == 0 else { return false }
+        guard let brightness = brightnessFor(display) else { return false }
         guard isDown else { return true }
         brightness.set(Self.stepped(brightness.value, by: fine ? Self.fineBrightnessStep : Self.brightnessStep, up: up))
         OSD.show(.brightness, level: brightness.value, on: display, chiclets: fine ? 64 : 16)
