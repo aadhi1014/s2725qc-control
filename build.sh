@@ -39,8 +39,10 @@ fi
 # while its window is open; its own bundle so the microphone permission belongs to it alone.
 SETUP="build/S2725QC Setup.app"
 rm -rf "$SETUP"
-mkdir -p "$SETUP/Contents/MacOS"
+mkdir -p "$SETUP/Contents/MacOS" "$SETUP/Contents/Resources"
 swiftc -O -parse-as-library Sources/Setup/*.swift -o "$SETUP/Contents/MacOS/S2725QCSetup"
+# Icon: drawn by Resources/make-icon.swift (swift make-icon.swift out.png, then iconutil).
+cp Resources/SetupIcon.icns "$SETUP/Contents/Resources/"
 cat > "$SETUP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -50,6 +52,7 @@ cat > "$SETUP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>S2725QC Setup</string>
   <key>CFBundleDisplayName</key><string>S2725QC Speaker Setup</string>
   <key>CFBundleExecutable</key><string>S2725QCSetup</string>
+  <key>CFBundleIconFile</key><string>SetupIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
