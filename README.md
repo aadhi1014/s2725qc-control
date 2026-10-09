@@ -78,6 +78,7 @@ window app that runs only while it's open.
 - **Test:** plays a tone on just that speaker.
 - **Sync from layout:** delays nearer speakers so all four arrive with the farthest one, computed
   from the drawn distances (sound travels 34.3 cm per ms). No microphone needed.
+- **Audio driver:** install, update or uninstall the virtual audio driver, which is bundled inside the app.
 - **Calibrate with microphone:** plays a short sweep on each speaker at 25% volume, hears it with
   the Mac's built-in microphone, applies per-speaker delays, then measures again to verify and
   shows before → after. Keep the Mac where it usually sits (its microphone stands in for your
@@ -127,8 +128,13 @@ Run `./build.sh --launcher` to rebuild the launcher app too (that resets its Acc
 
 ## Install
 
-**1. Driver** (admin). Copy from a location outside Desktop/Documents/Downloads, because
-privacy protection blocks root from reading those folders when using the GUI prompt:
+**1. Driver** (admin). Easiest: open `build/S2725QC Setup.app` and click **Install driver…** in
+its *Audio driver* section. It carries the driver inside, shows whether the installed one is up
+to date, and can update or uninstall it. It asks for your administrator password and briefly
+restarts macOS audio.
+
+From the terminal instead, copy from a location outside Desktop/Documents/Downloads first,
+because privacy protection blocks root from reading those folders when using the GUI prompt:
 
 ```sh
 cp -R driver/build/S2725QC.driver /tmp/
@@ -164,6 +170,8 @@ Controls: `brightness` (0x10), `contrast` (0x12), `volume` (0x62), `mute` (0x8D)
 `-d N` picks a monitor by position, 0 being the leftmost.
 
 ## Uninstall
+
+Uninstall the driver from S2725QC Speaker Setup (**Uninstall…**), or from the terminal:
 
 ```sh
 launchctl bootout gui/$(id -u)/dev.solderable.s2725qc-control

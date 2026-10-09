@@ -35,6 +35,8 @@ PLIST
 codesign --force --sign - "$APP"
 fi
 
+driver/build.sh
+
 # Speaker setup app (layout, test tones, microphone calibration). A normal app that runs only
 # while its window is open; its own bundle so the microphone permission belongs to it alone.
 SETUP="build/S2725QC Setup.app"
@@ -43,6 +45,8 @@ mkdir -p "$SETUP/Contents/MacOS" "$SETUP/Contents/Resources"
 swiftc -O -parse-as-library Sources/Setup/*.swift -o "$SETUP/Contents/MacOS/S2725QCSetup"
 # Icon: drawn by Resources/make-icon.swift (swift make-icon.swift out.png, then iconutil).
 cp Resources/SetupIcon.icns "$SETUP/Contents/Resources/"
+# The driver ships inside the app so it can install and update it.
+cp -R driver/build/S2725QC.driver "$SETUP/Contents/Resources/"
 cat > "$SETUP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -62,5 +66,4 @@ cat > "$SETUP/Contents/Info.plist" <<PLIST
 PLIST
 codesign --force --sign - "$SETUP"
 
-driver/build.sh
 echo "build complete"

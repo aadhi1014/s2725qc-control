@@ -34,7 +34,53 @@ final class SetupModel: ObservableObject {
     @Published var progress = 0.0
     @Published var message = ""
 
-    var deviceInstalled: Bool { VirtualDevice.id != nil }
+    @Published var deviceInstalled = VirtualDevice.id != nil
+    @Published var driverStatus = DriverInstaller.status
+    @Published var driverMessage = ""
+
+    func refreshDriver() {
+        driverStatus = DriverInstaller.status
+        deviceInstalled = VirtualDevice.id != nil
+    }
+
+    func installDriver() {
+        runDriverTask(working: "Installing… enter your password in the dialog.", done: "Driver installed. Audio restarted.",
+                      expectDevice: true) { try DriverInstaller.install() }
+    }
+
+    func uninstallDriver() {
+        let alert = NSAlert()
+        alert.messageText = "Uninstall the S2725QC audio driver?"
+        alert.informativeText = "The monitors' volume will stop working with the Mac's volume controls until you install it again. Audio restarts briefly."
+        alert.addButton(withTitle: "Uninstall")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        runDriverTask(working: "Removing… enter your password in the dialog.", done: "Driver removed. Audio restarted.",
+                      expectDevice: false) { try DriverInstaller.uninstall() }
+    }
+
+    private func runDriverTask(working: String, done: String, expectDevice: Bool,
+                               _ operation: @escaping @Sendable () throws -> Void) {
+        busy = true
+        driverMessage = working
+        Task.detached { [self] in
+            var failure: String?
+            do { try operation() } catch { failure = error.localizedDescription }
+            // Core Audio takes a moment to come back after the restart.
+            if failure == nil {
+                for _ in 0..<20 where (VirtualDevice.id != nil) != expectDevice {
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+            }
+            let message = failure ?? done
+            await MainActor.run {
+                self.driverMessage = message
+                self.refreshDriver()
+                self.busy = false
+            }
+        }
+    }
 
     func faceListener() {
         layout.left.angle = layout.left.facingListener
@@ -115,6 +161,8 @@ struct SetupView: View {
                     Text("Left and right follow System Settings → Displays → Arrange.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Divider().padding(.vertical, 4)
+                DriverSection(model: model)
             }
             .padding(20)
 
@@ -138,7 +186,7 @@ struct SetupView: View {
                     ProgressView(value: model.progress)
                 }
                 if !model.deviceInstalled {
-                    Text("The S2725QC virtual device isn't installed.").foregroundStyle(.red)
+                    Text("The S2725QC audio driver isn't installed; install it on the left.").foregroundStyle(.red)
                 } else if !model.message.isEmpty {
                     Text(model.message).fixedSize(horizontal: false, vertical: true)
                 }
@@ -152,7 +200,10 @@ struct SetupView: View {
             .padding(20)
             .frame(width: 400)
         }
-        .frame(height: 520)
+        .frame(height: 610)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.refreshDriver()
+        }
     }
 
     private var sourceDescription: String {
@@ -160,6 +211,52 @@ struct SetupView: View {
         case "microphone": "Current delays: measured with the microphone"
         case "layout": "Current delays: from the layout"
         default: "No delays applied"
+        }
+    }
+}
+
+struct DriverSection: View {
+    @ObservedObject var model: SetupModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Audio driver").font(.headline)
+                Spacer()
+                Image(systemName: icon).foregroundStyle(tint)
+                Text(model.driverStatus.description).font(.callout)
+            }
+            HStack {
+                Button(model.driverStatus == .notInstalled ? "Install driver…" :
+                       model.driverStatus == .differs ? "Update driver…" : "Reinstall driver…",
+                       action: model.installDriver)
+                    .disabled(model.busy || model.driverStatus == .notBundled)
+                Button("Uninstall…", action: model.uninstallDriver)
+                    .disabled(model.busy || model.driverStatus == .notInstalled)
+                Spacer()
+            }
+            Text(model.driverMessage.isEmpty
+                 ? "Installs “DELL S2725QC (DDC)” into /Library/Audio/Plug-Ins/HAL. Needs your administrator password and briefly restarts audio."
+                 : model.driverMessage)
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(width: 420)
+    }
+
+    private var icon: String {
+        switch model.driverStatus {
+        case .upToDate: "checkmark.circle.fill"
+        case .differs: "arrow.triangle.2.circlepath.circle.fill"
+        default: "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch model.driverStatus {
+        case .upToDate: .green
+        case .differs: .orange
+        default: .red
         }
     }
 }
