@@ -30,6 +30,25 @@ final class ConnectedMonitor {
     }
 }
 
+/// Per-speaker delays in ms for the quad channels [L, R, Ls, Rs], written by S2725QC Calibrate.
+let speakerDelaysKey = "speakerDelaysMs"
+let delaysChangedNotification = Notification.Name("dev.solderable.s2725qc.speakerDelaysChanged")
+
+/// Applies the calibrated delays to each monitor's two speakers (left speaker, right speaker).
+func applySpeakerDelays() {
+    UserDefaults.standard.synchronize()
+    let ms = (UserDefaults.standard.array(forKey: speakerDelaysKey) as? [Double]) ?? []
+    let d = (0..<4).map { $0 < ms.count ? ms[$0] : 0 }
+    for monitor in connected {
+        guard let bridge = monitor.bridge else { continue }
+        switch bridge.role {
+        case DDPMRoleLeftSide: bridge.setDelays(leftMs: d[2], rightMs: d[0])  // outer = Ls, inner = L
+        case DDPMRoleRightSide: bridge.setDelays(leftMs: d[1], rightMs: d[3]) // inner = R, outer = Rs
+        default: bridge.setDelays(leftMs: d[0], rightMs: d[1])
+        }
+    }
+}
+
 var connected: [ConnectedMonitor] = []
 var connectedSignature = ""
 var mirror: VolumeMirror?
@@ -105,6 +124,7 @@ func reconcile() {
         log("monitors: " + (connected.isEmpty ? "none" : connected.map {
             "\($0.label)=\($0.monitor.port)\($0.bridge == nil ? " (no audio)" : "")"
         }.joined(separator: ", ")))
+        applySpeakerDelays()
         if let virtual, mirror == nil { mirror = VolumeMirror(device: virtual) }
         mirror?.setWriters(connected.map(\.writer))
         menuBar?.update(monitors: connected)
@@ -169,6 +189,10 @@ public func agentMain() {
     // Monitors plugged in, unplugged or rearranged in System Settings > Displays.
     NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in
         reconcile()
+    }
+    DistributedNotificationCenter.default().addObserver(forName: delaysChangedNotification, object: nil, queue: .main) { _ in
+        applySpeakerDelays()
+        log("speaker delays updated")
     }
     mediaKeys = MediaKeys(virtualUID: virtualUID) { display in
         connected.first { $0.monitor.displayID == display }?.brightness

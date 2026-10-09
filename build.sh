@@ -35,5 +35,25 @@ PLIST
 codesign --force --sign - "$APP"
 fi
 
+# Speaker calibration tool: its own app so the microphone permission belongs to it alone.
+CAL="build/S2725QC Calibrate.app"
+mkdir -p "$CAL/Contents/MacOS"
+swiftc -O Sources/Calibrate/main.swift -o "$CAL/Contents/MacOS/S2725QCCalibrate"
+cat > "$CAL/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>dev.solderable.s2725qc-calibrate</string>
+  <key>CFBundleName</key><string>S2725QC Calibrate</string>
+  <key>CFBundleExecutable</key><string>S2725QCCalibrate</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSUIElement</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Measures when each monitor speaker's sound reaches you, to line them up.</string>
+</dict>
+</plist>
+PLIST
+codesign --force --sign - "$CAL"
+
 driver/build.sh
 echo "build complete"

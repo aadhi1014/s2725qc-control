@@ -24,10 +24,10 @@ final class Bridge {
             HAL.set(virtual, rateAddr, rate)
         }
 
-        let status = AudioDeviceCreateIOProcIDWithBlock(&procID, dell, nil) { _, _, _, outputData, _ in
+        let status = AudioDeviceCreateIOProcIDWithBlock(&procID, dell, nil) { _, _, _, outputData, outputTime in
             let first = outputData.pointee.mBuffers
             let bytesPerFrame = max(1, Int(first.mNumberChannels)) * MemoryLayout<Float32>.size
-            ddpm_reader_render(reader, outputData, UInt32(Int(first.mDataByteSize) / bytesPerFrame))
+            ddpm_reader_render(reader, outputData, UInt32(Int(first.mDataByteSize) / bytesPerFrame), outputTime.pointee.mHostTime)
         }
         guard status == noErr, procID != nil else {
             log("failed to create audio bridge (status \(status))")
@@ -51,6 +51,11 @@ final class Bridge {
             AudioDeviceStop(dell, procID)
             isRunning = false
         }
+    }
+
+    /// Calibration delays for the monitor's left and right speaker, in milliseconds.
+    func setDelays(leftMs: Double, rightMs: Double) {
+        ddpm_reader_set_delays(reader, Float(leftMs * 48), Float(rightMs * 48))
     }
 
     func destroy() {

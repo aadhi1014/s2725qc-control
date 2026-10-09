@@ -60,13 +60,37 @@ speakers. When rear audio appears (surround content), the outer speakers crossfa
 100 ms and keep playing the rear channels until they have been silent for 10 s. A single monitor
 plays L+Ls on its left speaker and R+Rs on its right.
 
-Each monitor has its own drift-corrected reader, so their clocks are tracked independently.
+### Timing and speaker calibration
+
+The driver publishes its clock (sample time ↔ host time) in the shared ring. For every output
+buffer, each monitor's reader plays exactly the sample that belongs to the moment that buffer
+reaches the monitor, a fixed 2048 frames (43 ms) late. Both monitors therefore play every sample
+at the same instant, sample-accurately and independent of when playback started, and a slow
+rate correction (max ±0.2%, inaudible) follows each monitor's clock drift. The fixed 43 ms is
+reported to apps as device latency, so video players compensate for it.
+
+On top of that, **S2725QC Calibrate** lines the four speakers up at your seat. It plays a short
+sweep on each speaker, hears it with the Mac's built-in microphone, and stores a small delay
+per speaker so all four arrive together:
+
+```sh
+open -W "$HOME/Applications/S2725QC Control/S2725QC Calibrate.app" --args 5 --apply   # measure + apply
+open -W "$HOME/Applications/S2725QC Control/S2725QC Calibrate.app" --args 5           # measure only
+```
+
+Leave the Mac where it normally sits (its microphone stands in for your ears), turn the volume up
+to about 25% while it runs, and keep the room quiet. `--stdout <file>` on `open` captures the
+report. Microphone access is asked for once and used only while it measures. Measured on the
+reference setup: speakers 0–1.7 ms apart before, within 0.02 ms after.
+
+Each monitor has its own reader, so their clocks are tracked independently.
 Plugging, unplugging or rearranging displays rebuilds this automatically.
 
 | Part | What it does |
 |---|---|
 | `driver/` | AudioServerPlugIn built from [BlackHole](https://github.com/ExistentialAudio/BlackHole) v0.7.2 (git submodule). Output-only, with real volume/mute controls, so macOS enables the stock slider and keys. `shm_writer.c` publishes the mixed output into a shared-memory ring instead of a loopback input. |
-| `Sources/ShmRing/` | Ring layout and the real-time reader. Apps choose how much audio the driver receives per cycle (512 frames for most; Safari uses 4096), so the reader measures that chunk size and stays just far enough behind the writer to bridge one chunk. It nudges its playback rate (max ±0.2%, inaudible) to absorb clock drift between the virtual device and each monitor. |
+| `Sources/ShmRing/` | Ring layout (quad audio plus the driver's clock) and the real-time reader, which plays each sample at its scheduled time on every monitor, applies per-speaker calibration delays, and handles the rear-speaker fallback. |
+| `Sources/Calibrate/` | **S2725QC Calibrate**: measures each speaker with the built-in microphone and stores per-speaker delays. |
 | `Sources/Agent/` | Background agent: discovers monitors (`Monitors.swift`), plays the ring to each one while something is playing, mirrors the slider to every monitor's DDC volume, handles volume/brightness keys (`CGEventTap`) with the native HUD (`OSD.framework`), and puts a slider menu in the menu bar. If macOS selects the monitor's raw output, it reroutes to the virtual device; if the monitor is unplugged, it falls back to the built-in speakers. |
 | `Sources/Launcher/` | A small, stable app that loads the agent library from next to itself. Rebuilding the agent doesn't change the app's signature, so its Accessibility permission survives rebuilds. |
 | `Sources/Shared/DDC.swift` | DDC/CI over `IOAVService` (Apple Silicon). |
@@ -154,8 +178,9 @@ Other DDC/CI monitors with DisplayPort/USB-C audio will probably work after chan
 
 - Uses private macOS APIs: `IOAVService` (DDC), `OSDManager` (HUD) and DisplayServices.
   A macOS update could break them.
-- Adds roughly 20–45 ms of audio latency so the device clocks can drift without dropouts.
-  It isn't reported to apps, so video lip-sync can be off by about that much.
+- Adds a fixed 43 ms of audio latency (reported to apps, so video stays in sync). The monitors'
+  own audio processing adds more that no app can see; on the S2725QC the full path from app to
+  ear measured about 124 ms.
 - Changing volume with the monitor's own buttons isn't reflected back on the Mac.
 - With two or more monitors, all of them follow one volume level. When the agent starts,
   it brings every monitor to the leftmost monitor's level.

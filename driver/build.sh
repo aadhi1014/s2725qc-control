@@ -19,8 +19,9 @@ def patch(old, new):
     src = src.replace(old, new)
 patch('#include <CoreAudio/AudioServerPlugIn.h>',
       '#include <CoreAudio/AudioServerPlugIn.h>\n'
+      '#include "../../Sources/ShmRing/ddpm_shm.h"\n'
       'void ShmRing_Init(void);\n'
-      'void ShmRing_Write(const Float32*, UInt32, Float64, bool);')
+      'void ShmRing_Write(const Float32*, UInt32, Float64, bool, UInt64, Float64);')
 patch('static OSStatus\tBlackHole_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPlugInHostRef inHost)\n{',
       'static OSStatus\tBlackHole_Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPlugInHostRef inHost)\n{\n\tShmRing_Init();')
 patch('static OSStatus\tBlackHole_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID)\n{',
@@ -28,7 +29,8 @@ patch('static OSStatus\tBlackHole_StartIO(AudioServerPlugInDriverRef inDriver, A
 patch('''        // Save the last output time.
         lastOutputSampleTime''', '''        if (inDeviceObjectID == kObjectID_Device)
         {
-            ShmRing_Write((const Float32*)ioMainBuffer, inIOBufferFrameSize, inIOCycleInfo->mOutputTime.mSampleTime, gMute_Master_Value);
+            ShmRing_Write((const Float32*)ioMainBuffer, inIOBufferFrameSize, inIOCycleInfo->mOutputTime.mSampleTime, gMute_Master_Value,
+                          gDevice_AnchorHostTime, gDevice_HostTicksPerFrame);
         }
 
         // Save the last output time.
@@ -36,6 +38,12 @@ patch('''        // Save the last output time.
 # Quad speaker layout (L, R, Ls, Rs) instead of BlackHole's default L, R, C, LFE labels.
 patch('mChannelDescriptions[theItemIndex].mChannelLabel = kAudioChannelLabel_Left + theItemIndex;',
       'mChannelDescriptions[theItemIndex].mChannelLabel = (AudioChannelLabel[]){ kAudioChannelLabel_Left, kAudioChannelLabel_Right, kAudioChannelLabel_LeftSurround, kAudioChannelLabel_RightSurround }[theItemIndex];')
+# Report the agent's fixed delay as device latency so apps (video players) compensate for it.
+patch("""device, the value is 0 due to the fact that it always vends silence.
+\t\t\tFailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyLatency for the device");
+\t\t\t*((UInt32*)outData) = 0;""", """device, the value is 0 due to the fact that it always vends silence.
+\t\t\tFailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyLatency for the device");
+\t\t\t*((UInt32*)outData) = DDPM_LATENCY_FRAMES;""")
 open(sys.argv[2], 'w').write(src)
 PY
 

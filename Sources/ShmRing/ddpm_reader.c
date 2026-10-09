@@ -8,17 +8,15 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-// The virtual device and the monitor run on independent clocks, and the driver writes in
-// chunks whose size the playing app picks (512 frames for most apps; Safari uses 4096).
-// Between two chunks the reader's backlog drops by a full chunk, so it must start each
-// chunk at least (chunk + one reader buffer + margin) behind the writer or it runs dry.
-// The reader measures the chunk size, aims its average backlog at the middle of that
-// sawtooth, and nudges its playback rate (by at most kMaxRateDelta, inaudible) to hold
-// it there as the clocks drift apart.
-static const double kMinChunk = 512.0;
-static const double kMargin = 384.0;
+// Timing: the driver publishes its clock (sample time s plays at anchor + s * ticksPerFrame).
+// For each output buffer, the monitor's IOProc says at which host time it will be presented;
+// the reader plays the sample that belongs to that moment, DDPM_LATENCY_FRAMES late. Every
+// monitor therefore plays each sample at the same instant, independent of when playback
+// started, and per-speaker calibration delays stay valid. A slow rate correction (at most
+// kMaxRateDelta, inaudible) keeps the read position on that target as the monitor's clock drifts.
 static const double kMaxRateDelta = 0.002;
-static const double kRateGain = 0.0005 / 512.0;
+static const double kRateGain = 2e-5;      // rate correction per frame of timing error
+static const double kResyncError = 512.0;  // jump instead of correcting when this far off
 
 static const DDPMShm *gShm = NULL;
 
@@ -33,26 +31,28 @@ struct DDPMReader {
     DDPMRole role;
     int64_t rearHold; ///< Frames left during which the rear channels count as active.
     float rearMix;    ///< 0 = rear speakers copy the front channel, 1 = they play the rear channel.
-    bool active;
+    bool locked;      ///< readPos is tracking the clock identified by `anchor`.
+    uint64_t anchor;
     double readPos;
-    double fillAvg;
-    int64_t lastIdleWrite;
-    int64_t lastWriteEnd;
-    double chunk; ///< Largest writer step recently seen; decays slowly. Kept across idle periods.
+    float delay[2];   ///< Calibration delay per speaker (0 = left, 1 = right), in frames.
 };
 
 DDPMReader *ddpm_reader_create(DDPMRole role)
 {
     DDPMReader *reader = calloc(1, sizeof(DDPMReader));
     reader->role = role;
-    reader->lastIdleWrite = -1;
-    reader->chunk = kMinChunk;
     return reader;
 }
 
 void ddpm_reader_destroy(DDPMReader *reader)
 {
     free(reader);
+}
+
+void ddpm_reader_set_delays(DDPMReader *reader, float leftFrames, float rightFrames)
+{
+    reader->delay[0] = fmaxf(0, fminf(leftFrames, DDPM_SHM_CAPACITY / 4));
+    reader->delay[1] = fmaxf(0, fminf(rightFrames, DDPM_SHM_CAPACITY / 4));
 }
 
 bool ddpm_ring_open(void)
@@ -79,30 +79,7 @@ static void silence(AudioBufferList *output)
     }
 }
 
-/// Backlog right after a chunk arrives: enough to last until the next one.
-static double startFill(const DDPMReader *reader, UInt32 frames)
-{
-    return reader->chunk + frames + kMargin;
-}
-
-/// Average backlog over the writer's sawtooth (from startFill down to startFill - chunk).
-static double targetFill(const DDPMReader *reader, UInt32 frames)
-{
-    return startFill(reader, frames) - reader->chunk / 2;
-}
-
-static void trackChunk(DDPMReader *reader, int64_t writeEnd)
-{
-    int64_t step = writeEnd - reader->lastWriteEnd;
-    reader->lastWriteEnd = writeEnd;
-    if (step > 0 && step <= DDPM_SHM_CAPACITY / 4) {
-        if (step > reader->chunk) reader->chunk = (double)step;
-    }
-    // Decay toward the smallest chunk over ~30 s so latency shrinks again after a big-chunk app stops.
-    reader->chunk = fmax(kMinChunk, reader->chunk * 0.99995);
-}
-
-void ddpm_reader_render(DDPMReader *reader, AudioBufferList *output, UInt32 frames)
+void ddpm_reader_render(DDPMReader *reader, AudioBufferList *output, UInt32 frames, UInt64 outputHostTime)
 {
     const DDPMShm *shm = gShm;
     if (!shm || output->mNumberBuffers == 0 || !output->mBuffers[0].mData) {
@@ -110,37 +87,33 @@ void ddpm_reader_render(DDPMReader *reader, AudioBufferList *output, UInt32 fram
         return;
     }
     int64_t writeEnd = atomic_load_explicit((_Atomic int64_t *)&shm->writeEnd, memory_order_acquire);
-    trackChunk(reader, writeEnd);
-
-    if (!reader->active) {
-        // Wait until the writer produces new audio, then start far enough behind it.
-        if (writeEnd == reader->lastIdleWrite || writeEnd < (int64_t)startFill(reader, frames)) {
-            reader->lastIdleWrite = writeEnd;
-            silence(output);
-            return;
-        }
-        reader->readPos = (double)writeEnd - startFill(reader, frames);
-        reader->fillAvg = targetFill(reader, frames);
-        reader->active = true;
-    }
-
-    double fill = (double)writeEnd - reader->readPos;
-    if (fill < 0 || fill > DDPM_SHM_CAPACITY - 2.0 * frames) {
-        // Writer restarted (sample time reset) or we fell far behind: resync.
-        reader->readPos = (double)writeEnd - startFill(reader, frames);
-        reader->fillAvg = targetFill(reader, frames);
-        fill = startFill(reader, frames);
-    }
-    if (fill < frames * (1.0 + kMaxRateDelta) + 2.0) {
-        // Writer stopped (playback ended). Go idle until it advances again.
-        reader->active = false;
-        reader->lastIdleWrite = writeEnd;
+    uint64_t anchor = atomic_load_explicit((_Atomic uint64_t *)&shm->anchorHostTime, memory_order_relaxed);
+    double ticksPerFrame = atomic_load_explicit((_Atomic double *)&shm->hostTicksPerFrame, memory_order_relaxed);
+    if (ticksPerFrame <= 0 || outputHostTime < anchor) {
+        reader->locked = false;
         silence(output);
         return;
     }
 
-    reader->fillAvg += (fill - reader->fillAvg) * 0.01;
-    double rate = 1.0 + fmax(-kMaxRateDelta, fmin(kMaxRateDelta, (reader->fillAvg - targetFill(reader, frames)) * kRateGain));
+    // The sample that should be heard when this buffer is presented.
+    double target = (double)(outputHostTime - anchor) / ticksPerFrame - DDPM_LATENCY_FRAMES;
+    if (!reader->locked || anchor != reader->anchor || fabs(reader->readPos - target) > kResyncError) {
+        reader->readPos = target;
+        reader->anchor = anchor;
+        reader->locked = true;
+    }
+    double rate = 1.0 - fmax(-kMaxRateDelta, fmin(kMaxRateDelta, (reader->readPos - target) * kRateGain));
+
+    // Everything this buffer reads must already be written and not yet overwritten;
+    // otherwise playback stopped (or hasn't caught up), so stay silent.
+    double maxDelay = fmaxf(reader->delay[0], reader->delay[1]);
+    double newest = reader->readPos + frames * rate + 1;
+    double oldest = reader->readPos - maxDelay - 1;
+    if (newest >= (double)writeEnd || oldest < (double)(writeEnd - (int64_t)DDPM_SHM_CAPACITY)) {
+        reader->readPos += frames; // keep following the clock
+        silence(output);
+        return;
+    }
 
     const uint32_t mask = DDPM_SHM_CAPACITY - 1;
 
@@ -171,14 +144,15 @@ void ddpm_reader_render(DDPMReader *reader, AudioBufferList *output, UInt32 fram
     float *dst = buf->mData;
     double pos = reader->readPos;
     for (UInt32 f = 0; f < frames; f++) {
-        int64_t i0 = (int64_t)floor(pos);
-        float frac = (float)(pos - (double)i0);
-        const float *a = &shm->data[((uint64_t)i0 & mask) * DDPM_SHM_CHANNELS];
-        const float *b = &shm->data[((uint64_t)(i0 + 1) & mask) * DDPM_SHM_CHANNELS];
         if (reader->rearMix < rearTarget) reader->rearMix = fminf(rearTarget, reader->rearMix + kRearFadeStep);
         if (reader->rearMix > rearTarget) reader->rearMix = fmaxf(rearTarget, reader->rearMix - kRearFadeStep);
         for (UInt32 c = 0; c < channels; c++) {
             UInt32 sp = c < 2 ? c : 1;
+            double p = pos - reader->delay[sp];
+            int64_t i0 = (int64_t)floor(p);
+            float frac = (float)(p - (double)i0);
+            const float *a = &shm->data[((uint64_t)i0 & mask) * DDPM_SHM_CHANNELS];
+            const float *b = &shm->data[((uint64_t)(i0 + 1) & mask) * DDPM_SHM_CHANNELS];
             float va = a[front[sp]], vb = b[front[sp]];
             if (rear[sp] >= 0) {
                 float ra = a[rear[sp]], rb = b[rear[sp]];
@@ -198,4 +172,3 @@ void ddpm_reader_render(DDPMReader *reader, AudioBufferList *output, UInt32 fram
         if (output->mBuffers[i].mData) memset(output->mBuffers[i].mData, 0, output->mBuffers[i].mDataByteSize);
     }
 }
-

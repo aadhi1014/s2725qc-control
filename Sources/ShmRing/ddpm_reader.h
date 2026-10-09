@@ -22,7 +22,11 @@ bool ddpm_ring_open(void);
 DDPMReader *ddpm_reader_create(DDPMRole role);
 void ddpm_reader_destroy(DDPMReader *reader);
 
-/// Fills `output` from the ring with drift correction; silence when nothing is playing. Real-time safe.
-void ddpm_reader_render(DDPMReader *reader, AudioBufferList *output, UInt32 frames);
+/// Delays (in frames, >= 0) for the monitor's left and right speaker, from acoustic calibration.
+void ddpm_reader_set_delays(DDPMReader *reader, float leftFrames, float rightFrames);
+
+/// Fills `output` with the audio due at `outputHostTime` (when the buffer reaches the monitor);
+/// silence when nothing is playing. Real-time safe.
+void ddpm_reader_render(DDPMReader *reader, AudioBufferList *output, UInt32 frames, UInt64 outputHostTime);
 
 #endif

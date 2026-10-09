@@ -47,7 +47,8 @@ void ShmRing_Init(void)
 }
 
 /// Copies one mixed output buffer (interleaved quad float) into the ring. Real-time safe.
-void ShmRing_Write(const Float32 *buffer, UInt32 frames, Float64 sampleTime, bool mute)
+void ShmRing_Write(const Float32 *buffer, UInt32 frames, Float64 sampleTime, bool mute,
+                   UInt64 anchorHostTime, Float64 hostTicksPerFrame)
 {
     DDPMShm *shm = gShm;
     if (!shm) return;
@@ -59,5 +60,7 @@ void ShmRing_Write(const Float32 *buffer, UInt32 frames, Float64 sampleTime, boo
             dst[c] = mute ? 0 : buffer[f * DDPM_SHM_CHANNELS + c];
         }
     }
+    atomic_store_explicit(&shm->anchorHostTime, anchorHostTime, memory_order_relaxed);
+    atomic_store_explicit(&shm->hostTicksPerFrame, hostTicksPerFrame, memory_order_relaxed);
     atomic_store_explicit(&shm->writeEnd, start + frames, memory_order_release);
 }
