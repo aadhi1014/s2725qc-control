@@ -41,7 +41,16 @@ final class MenuBar: NSObject, NSMenuDelegate {
             menu.addItem(sliderRow(volumeSlider, symbol: "speaker.wave.2.fill", label: nil, action: #selector(volumeChanged)))
         }
         menu.addItem(.separator())
+        let setup = NSMenuItem(title: "Speaker Setup…", action: #selector(openSetup), keyEquivalent: ",")
+        setup.target = self
+        menu.addItem(setup)
         menu.addItem(NSMenuItem(title: "Quit S2725QC Control", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    /// Opens S2725QC Setup, installed next to this app.
+    @objc private func openSetup() {
+        let url = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("S2725QC Setup.app")
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
     }
 
     private var virtualDevice: AudioObjectID? { HAL.device(uid: virtualUID) }

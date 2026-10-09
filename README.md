@@ -69,19 +69,22 @@ at the same instant, sample-accurately and independent of when playback started,
 rate correction (max ±0.2%, inaudible) follows each monitor's clock drift. The fixed 43 ms is
 reported to apps as device latency, so video players compensate for it.
 
-On top of that, **S2725QC Calibrate** lines the four speakers up at your seat. It plays a short
-sweep on each speaker, hears it with the Mac's built-in microphone, and stores a small delay
-per speaker so all four arrive together:
+On top of that, **S2725QC Speaker Setup** lines the four speakers up at your seat. Open it from
+the menu bar icon (**Speaker Setup…**) or from `~/Applications/S2725QC Control/`. It's a normal
+window app that runs only while it's open.
 
-```sh
-open -W "$HOME/Applications/S2725QC Control/S2725QC Calibrate.app" --args 5 --apply   # measure + apply
-open -W "$HOME/Applications/S2725QC Control/S2725QC Calibrate.app" --args 5           # measure only
-```
+- **Room layout:** a top-down view with you at the bottom. Drag each monitor into place and turn
+  it with its round handle (or click **Face me**). It shows every speaker's distance to you.
+- **Test:** plays a tone on just that speaker.
+- **Sync from layout:** delays nearer speakers so all four arrive with the farthest one, computed
+  from the drawn distances (sound travels 34.3 cm per ms). No microphone needed.
+- **Calibrate with microphone:** plays a short sweep on each speaker at 25% volume, hears it with
+  the Mac's built-in microphone, applies per-speaker delays, then measures again to verify and
+  shows before → after. Keep the Mac where it usually sits (its microphone stands in for your
+  ears) and the room quiet. Microphone access is requested once and used only while measuring.
+  On the reference setup: 0–1.7 ms apart before, within 0.02 ms after.
 
-Leave the Mac where it normally sits (its microphone stands in for your ears), turn the volume up
-to about 25% while it runs, and keep the room quiet. `--stdout <file>` on `open` captures the
-report. Microphone access is asked for once and used only while it measures. Measured on the
-reference setup: speakers 0–1.7 ms apart before, within 0.02 ms after.
+The delays are stored in the agent's preferences and take effect immediately.
 
 Each monitor has its own reader, so their clocks are tracked independently.
 Plugging, unplugging or rearranging displays rebuilds this automatically.
@@ -90,7 +93,7 @@ Plugging, unplugging or rearranging displays rebuilds this automatically.
 |---|---|
 | `driver/` | AudioServerPlugIn built from [BlackHole](https://github.com/ExistentialAudio/BlackHole) v0.7.2 (git submodule). Output-only, with real volume/mute controls, so macOS enables the stock slider and keys. `shm_writer.c` publishes the mixed output into a shared-memory ring instead of a loopback input. |
 | `Sources/ShmRing/` | Ring layout (quad audio plus the driver's clock) and the real-time reader, which plays each sample at its scheduled time on every monitor, applies per-speaker calibration delays, and handles the rear-speaker fallback. |
-| `Sources/Calibrate/` | **S2725QC Calibrate**: measures each speaker with the built-in microphone and stores per-speaker delays. |
+| `Sources/Setup/` | **S2725QC Speaker Setup** (SwiftUI): room layout, per-speaker test tones, and layout- or microphone-based speaker sync. |
 | `Sources/Agent/` | Background agent: discovers monitors (`Monitors.swift`), plays the ring to each one while something is playing, mirrors the slider to every monitor's DDC volume, handles volume/brightness keys (`CGEventTap`) with the native HUD (`OSD.framework`), and puts a slider menu in the menu bar. If macOS selects the monitor's raw output, it reroutes to the virtual device; if the monitor is unplugged, it falls back to the built-in speakers. |
 | `Sources/Launcher/` | A small, stable app that loads the agent library from next to itself. Rebuilding the agent doesn't change the app's signature, so its Accessibility permission survives rebuilds. |
 | `Sources/Shared/DDC.swift` | DDC/CI over `IOAVService` (Apple Silicon). |
@@ -119,7 +122,7 @@ cd s2725qc-control
 ```
 
 Output in `build/`: `S2725QC Control.app` (launcher), `libS2725QCAgent.dylib` (agent),
-`ddc` (CLI). The driver is built to `driver/build/S2725QC.driver`.
+`S2725QC Setup.app` (speaker setup), `ddc` (CLI). The driver is built to `driver/build/S2725QC.driver`.
 Run `./build.sh --launcher` to rebuild the launcher app too (that resets its Accessibility grant).
 
 ## Install
