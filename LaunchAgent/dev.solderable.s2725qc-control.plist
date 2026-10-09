@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.solderable.s2725qc-control</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__APP__/Contents/MacOS/S2725QCControl</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <!-- Restart after a crash, but stay stopped after Quit from the menu bar. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardErrorPath</key><string>/tmp/s2725qc-control.log</string>
+</dict>
+</plist>
