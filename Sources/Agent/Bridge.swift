@@ -1,21 +1,21 @@
 import CoreAudio
 import Foundation
 
-/// Plays everything sent to the virtual device (or one channel of it) out of a monitor's DisplayPort audio.
+/// Plays the virtual device's quad output (or one side of it) out of a monitor's DisplayPort audio.
 ///
 /// The driver publishes its mixed output in a shared-memory ring (Sources/ShmRing); this
 /// runs an output-only IOProc on the monitor that drains it. Nothing is captured, so macOS
 /// shows no microphone indicator.
 final class Bridge {
     let dell: AudioObjectID
-    let channel: DDPMChannel
+    let role: DDPMRole
     private var procID: AudioDeviceIOProcID?
     private let reader: OpaquePointer
 
-    init?(dell: AudioObjectID, virtual: AudioObjectID, channel: DDPMChannel) {
+    init?(dell: AudioObjectID, virtual: AudioObjectID, role: DDPMRole) {
         self.dell = dell
-        self.channel = channel
-        let reader = ddpm_reader_create(channel)!
+        self.role = role
+        let reader = ddpm_reader_create(role)!
         self.reader = reader
 
         // Match the virtual device's sample rate to the monitor's; the ring carries no rate conversion.

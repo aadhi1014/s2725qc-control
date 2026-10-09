@@ -5,19 +5,21 @@
 #include <CoreAudio/CoreAudioTypes.h>
 #include <stdbool.h>
 
-/// Which part of the stereo signal a monitor plays.
+/// Which speakers of the quad layout (L, R, Ls, Rs) a monitor's two speakers play.
+/// Rear speakers fall back to the front channel while the rear channels are silent,
+/// which is the case for all stereo content.
 typedef enum {
-    DDPMChannelStereo = -1, ///< L/R to the monitor's own left/right speakers.
-    DDPMChannelLeft = 0,    ///< Left channel on all of the monitor's speakers.
-    DDPMChannelRight = 1,   ///< Right channel on all of the monitor's speakers.
-} DDPMChannel;
+    DDPMRoleStereo,    ///< Single monitor: left speaker L+Ls, right speaker R+Rs.
+    DDPMRoleLeftSide,  ///< Left monitor: outer (left) speaker Ls, inner (right) speaker L.
+    DDPMRoleRightSide, ///< Right monitor: inner (left) speaker R, outer (right) speaker Rs.
+} DDPMRole;
 
 typedef struct DDPMReader DDPMReader;
 
 /// Maps the ring published by the driver. Returns false if the driver hasn't created it.
 bool ddpm_ring_open(void);
 
-DDPMReader *ddpm_reader_create(DDPMChannel channel);
+DDPMReader *ddpm_reader_create(DDPMRole role);
 void ddpm_reader_destroy(DDPMReader *reader);
 
 /// Fills `output` from the ring with drift correction; silence when nothing is playing. Real-time safe.

@@ -7,10 +7,12 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-#define DDPM_SHM_NAME      "/dev.solderable.s2725qc"
+// POSIX shm objects can't be resized on macOS, so the name changes with the layout.
+#define DDPM_SHM_NAME      "/dev.solderable.s2725qc.2"
 #define DDPM_SHM_MAGIC     0x44445043u /* 'DDPC' */
-#define DDPM_SHM_VERSION   1u
-#define DDPM_SHM_CHANNELS  2u
+#define DDPM_SHM_VERSION   2u
+/// Quad: front left, front right, left surround, right surround.
+#define DDPM_SHM_CHANNELS  4u
 #define DDPM_SHM_CAPACITY  16384u /* frames, power of two */
 
 typedef struct {

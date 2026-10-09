@@ -12,13 +12,13 @@ final class ConnectedMonitor {
     let brightness: MonitorBrightness
     let bridge: Bridge?
 
-    init(monitor: Monitor, label: String, channel: DDPMChannel, virtual: AudioObjectID?) {
+    init(monitor: Monitor, label: String, role: DDPMRole, virtual: AudioObjectID?) {
         self.monitor = monitor
         self.label = label
         writer = DDCWriter(display: monitor.ddc)
         brightness = MonitorBrightness(writer: writer)
         if let virtual, let audio = monitor.audioDevice {
-            bridge = Bridge(dell: audio, virtual: virtual, channel: channel)
+            bridge = Bridge(dell: audio, virtual: virtual, role: role)
         } else {
             bridge = nil
         }
@@ -77,13 +77,13 @@ func findBuiltInSpeakers() -> AudioObjectID? {
     }
 }
 
-/// With several monitors side by side, the leftmost plays the left channel and the
-/// rightmost the right channel; a single (or middle) monitor plays stereo.
-func channelAndLabel(index: Int, count: Int) -> (DDPMChannel, String) {
-    if count == 1 { return (DDPMChannelStereo, "Monitor") }
-    if index == 0 { return (DDPMChannelLeft, "Left") }
-    if index == count - 1 { return (DDPMChannelRight, "Right") }
-    return (DDPMChannelStereo, "Middle \(index)")
+/// With several monitors side by side, the leftmost is the left front + left surround pair and
+/// the rightmost the right pair; a single (or middle) monitor plays stereo.
+func roleAndLabel(index: Int, count: Int) -> (DDPMRole, String) {
+    if count == 1 { return (DDPMRoleStereo, "Monitor") }
+    if index == 0 { return (DDPMRoleLeftSide, "Left") }
+    if index == count - 1 { return (DDPMRoleRightSide, "Right") }
+    return (DDPMRoleStereo, "Middle \(index)")
 }
 
 /// Idempotent: called at launch and whenever devices, the default output or the display arrangement change.
@@ -99,8 +99,8 @@ func reconcile() {
         connectedSignature = signature
         connected.forEach { $0.destroy() }
         connected = monitors.enumerated().map { index, monitor in
-            let (channel, label) = channelAndLabel(index: index, count: monitors.count)
-            return ConnectedMonitor(monitor: monitor, label: label, channel: channel, virtual: virtual)
+            let (role, label) = roleAndLabel(index: index, count: monitors.count)
+            return ConnectedMonitor(monitor: monitor, label: label, role: role, virtual: virtual)
         }
         log("monitors: " + (connected.isEmpty ? "none" : connected.map {
             "\($0.label)=\($0.monitor.port)\($0.bridge == nil ? " (no audio)" : "")"

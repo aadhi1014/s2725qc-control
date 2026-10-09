@@ -8,8 +8,10 @@ Dell Display and Peripheral Manager (DDPM).
 - **2% volume steps** on the volume keys (macOS normally uses 1/16).
 - **Brightness keys** control whichever monitor the pointer is on, with the native
   brightness HUD (1/16 steps, 1/64 with Shift+Option).
-- **Multiple monitors.** With two monitors side by side, the left one plays the left channel and
-  the right one the right channel. One volume control drives both, and brightness is per monitor.
+- **Multiple monitors as quad speakers.** With two monitors side by side, the virtual device is a
+  4-speaker (quadraphonic) output: each monitor's inner speaker is front left/right and its outer
+  speaker rear left/right. Stereo content plays on all four. One volume control drives both
+  monitors, and brightness is per monitor.
 - **Menu bar sliders** for each monitor's brightness and the shared volume.
 - **No microphone indicator.** Audio is handed over through shared memory, not a loopback input.
 - Changes go to the monitor immediately on a dedicated thread; only the newest value is written,
@@ -26,12 +28,12 @@ which is laggy and doesn't help the Control Center slider.
 ## How it works
 
 ```
- apps ──► "DELL S2725QC (DDC)"  virtual output device (driver/)
+ apps ──► "DELL S2725QC (DDC)"  virtual quad output device (driver/), L R Ls Rs
             │  volume / mute controls ─────────► agent ──► DDC/CI VCP 0x62 ──► monitor volume
             │  mixed audio
             ▼
-         POSIX shared-memory ring ──► agent ─┬─► left monitor's DisplayPort audio  (L channel)
-                                             └─► right monitor's DisplayPort audio (R channel)
+         POSIX shared-memory ring ──► agent ─┬─► left monitor:  outer speaker Ls, inner speaker L
+                                             └─► right monitor: inner speaker R,  outer speaker Rs
 ```
 
 ### Multiple monitors
@@ -43,16 +45,28 @@ hardware identity, not by name:
 - **DDC ⇄ audio:** the DDC service and the `DCPAVAudioDriver` sit under the same display
   coprocessor port (`dispextN`) in the IORegistry; the driver's `device UID` is the CoreAudio UID.
 
-Monitors are then ordered by their left edge in System Settings → Displays → Arrange. The leftmost
-plays the left channel on both of its speakers, the rightmost the right channel, and a single
-monitor plays normal stereo. Each monitor has its own drift-corrected reader, so their clocks
-are tracked independently. Plugging, unplugging or rearranging displays rebuilds this
-automatically.
+Monitors are then ordered by their left edge in System Settings → Displays → Arrange, and the
+pair acts as quad speakers, assuming each monitor is angled toward you:
+
+```
+        [L]                        [R]
+  [Ls]   LEFT MONITOR    (Mac)    RIGHT MONITOR   [Rs]
+   outer    inner                   inner    outer
+```
+
+Most apps play stereo, and macOS sends stereo only to the front pair. While the rear channels are
+silent, the outer speakers copy the front channel of their side, so stereo fills all four
+speakers. When rear audio appears (surround content), the outer speakers crossfade to it over
+100 ms and keep playing the rear channels until they have been silent for 10 s. A single monitor
+plays L+Ls on its left speaker and R+Rs on its right.
+
+Each monitor has its own drift-corrected reader, so their clocks are tracked independently.
+Plugging, unplugging or rearranging displays rebuilds this automatically.
 
 | Part | What it does |
 |---|---|
 | `driver/` | AudioServerPlugIn built from [BlackHole](https://github.com/ExistentialAudio/BlackHole) v0.7.2 (git submodule). Output-only, with real volume/mute controls, so macOS enables the stock slider and keys. `shm_writer.c` publishes the mixed output into a shared-memory ring instead of a loopback input. |
-| `Sources/ShmRing/` | Ring layout and the real-time reader. The reader stays ~43 ms behind the writer and nudges its playback rate (max ±0.2%) to absorb clock drift between the virtual device and the monitor. |
+| `Sources/ShmRing/` | Ring layout and the real-time reader. Apps choose how much audio the driver receives per cycle (512 frames for most; Safari uses 4096), so the reader measures that chunk size and stays just far enough behind the writer to bridge one chunk. It nudges its playback rate (max ±0.2%, inaudible) to absorb clock drift between the virtual device and each monitor. |
 | `Sources/Agent/` | Background agent: discovers monitors (`Monitors.swift`), plays the ring to each one while something is playing, mirrors the slider to every monitor's DDC volume, handles volume/brightness keys (`CGEventTap`) with the native HUD (`OSD.framework`), and puts a slider menu in the menu bar. If macOS selects the monitor's raw output, it reroutes to the virtual device; if the monitor is unplugged, it falls back to the built-in speakers. |
 | `Sources/Launcher/` | A small, stable app that loads the agent library from next to itself. Rebuilding the agent doesn't change the app's signature, so its Accessibility permission survives rebuilds. |
 | `Sources/Shared/DDC.swift` | DDC/CI over `IOAVService` (Apple Silicon). |
@@ -140,7 +154,8 @@ Other DDC/CI monitors with DisplayPort/USB-C audio will probably work after chan
 
 - Uses private macOS APIs: `IOAVService` (DDC), `OSDManager` (HUD) and DisplayServices.
   A macOS update could break them.
-- Adds ~43 ms of audio latency so the two device clocks can drift without dropouts.
+- Adds roughly 20–45 ms of audio latency so the device clocks can drift without dropouts.
+  It isn't reported to apps, so video lip-sync can be off by about that much.
 - Changing volume with the monitor's own buttons isn't reflected back on the Mac.
 - With two or more monitors, all of them follow one volume level. When the agent starts,
   it brings every monitor to the leftmost monitor's level.

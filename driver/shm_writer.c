@@ -46,7 +46,7 @@ void ShmRing_Init(void)
     os_log(OS_LOG_DEFAULT, "S2725QC: shared ring ready");
 }
 
-/// Copies one mixed output buffer (interleaved stereo float) into the ring. Real-time safe.
+/// Copies one mixed output buffer (interleaved quad float) into the ring. Real-time safe.
 void ShmRing_Write(const Float32 *buffer, UInt32 frames, Float64 sampleTime, bool mute)
 {
     DDPMShm *shm = gShm;
@@ -55,10 +55,8 @@ void ShmRing_Write(const Float32 *buffer, UInt32 frames, Float64 sampleTime, boo
     const uint32_t mask = DDPM_SHM_CAPACITY - 1;
     for (UInt32 f = 0; f < frames; f++) {
         float *dst = &shm->data[((uint64_t)(start + f) & mask) * DDPM_SHM_CHANNELS];
-        if (mute) {
-            dst[0] = 0; dst[1] = 0;
-        } else {
-            dst[0] = buffer[f * 2]; dst[1] = buffer[f * 2 + 1];
+        for (UInt32 c = 0; c < DDPM_SHM_CHANNELS; c++) {
+            dst[c] = mute ? 0 : buffer[f * DDPM_SHM_CHANNELS + c];
         }
     }
     atomic_store_explicit(&shm->writeEnd, start + frames, memory_order_release);

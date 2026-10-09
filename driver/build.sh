@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Builds S2725QC.driver: a BlackHole-based, output-only virtual device with volume/mute controls.
+# Builds S2725QC.driver: a BlackHole-based, output-only quad (L, R, Ls, Rs) virtual device with volume/mute controls.
 # Mixed output is published through a POSIX shared-memory ring (shm_writer.c) instead of a
 # loopback input stream, so the agent never captures audio. The agent plays the ring to the
 # monitor and mirrors volume to it via DDC/CI.
@@ -33,6 +33,9 @@ patch('''        // Save the last output time.
 
         // Save the last output time.
         lastOutputSampleTime''')
+# Quad speaker layout (L, R, Ls, Rs) instead of BlackHole's default L, R, C, LFE labels.
+patch('mChannelDescriptions[theItemIndex].mChannelLabel = kAudioChannelLabel_Left + theItemIndex;',
+      'mChannelDescriptions[theItemIndex].mChannelLabel = (AudioChannelLabel[]){ kAudioChannelLabel_Left, kAudioChannelLabel_Right, kAudioChannelLabel_LeftSurround, kAudioChannelLabel_RightSurround }[theItemIndex];')
 open(sys.argv[2], 'w').write(src)
 PY
 
@@ -42,6 +45,7 @@ clang -O2 -bundle -arch arm64 -mmacosx-version-min=12.0 -w \
   -DkHas_Driver_Name_Format=false \
   -DkDevice_Name='"DELL S2725QC (DDC)"' \
   -DkManufacturer_Name='"Dell"' \
+  -DkNumber_Of_Channels=4 \
   -DkDevice_HasInput=false \
   -DkDevice2_HasInput=false \
   -DkPlugIn_Icon='""' \
