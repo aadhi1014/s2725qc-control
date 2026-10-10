@@ -105,11 +105,69 @@ func roleAndLabel(index: Int, count: Int) -> (DDPMRole, String) {
     return (DDPMRoleStereo, "Middle \(index)")
 }
 
+var previousDefault: AudioObjectID?
+var lastDeviceListChange = Date.distantPast
+var hardwareSignature = ""
+var discoveredMonitors: [Monitor] = []
+
+func describe(_ device: AudioObjectID) -> String {
+    let name = HAL.string(device, kAudioObjectPropertyName) ?? "device \(device)"
+    switch HAL.transportType(device) {
+    case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE: return name + " (Bluetooth)"
+    case kAudioDeviceTransportTypeDisplayPort: return name + " (DisplayPort)"
+    case kAudioDeviceTransportTypeVirtual: return name + " (virtual)"
+    default: return name
+    }
+}
+
+/// Cheap fingerprint of the DisplayPort audio devices and external screens. Monitor discovery
+/// (IOKit + EDID reads) only reruns when it changes, not for every audio device change such as
+/// AirPods connecting.
+func currentHardwareSignature() -> String {
+    let dp = HAL.devices().filter { HAL.transportType($0) == kAudioDeviceTransportTypeDisplayPort }.sorted()
+    var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+    var count: UInt32 = 0
+    CGGetOnlineDisplayList(16, &ids, &count)
+    let screens = ids.prefix(Int(count)).filter { CGDisplayIsBuiltin($0) == 0 }.map { "\($0)@\(Int(CGDisplayBounds($0).minX))" }
+    return "\(dp)|\(screens)"
+}
+
+/// Keeps the default output sensible:
+/// - macOS picked a monitor's raw (volume-less) output: use the virtual device instead, unless
+///   that happened because monitors just reconnected while other headphones/speakers (e.g.
+///   AirPods) were in use. Then those stay the output.
+/// - monitors unplugged while the virtual device is the output: fall back to the built-in speakers.
+func routeDefaultOutput(virtual: AudioObjectID, monitorAudio: [AudioObjectID]) {
+    let current = HAL.defaultOutput
+    if let current, current != previousDefault { log("default output: \(describe(current))") }
+    defer { previousDefault = HAL.defaultOutput }
+
+    if monitorAudio.isEmpty {
+        if current == virtual, let speakers = findBuiltInSpeakers() { HAL.setDefaultOutput(speakers) }
+        return
+    }
+    guard let current, monitorAudio.contains(current) else { return }
+    if let previous = previousDefault, previous != virtual, !monitorAudio.contains(previous),
+       HAL.devices().contains(previous), HAL.outputChannelCount(previous) > 0,
+       Date().timeIntervalSince(lastDeviceListChange) < 3 {
+        HAL.setDefaultOutput(previous)
+        log("kept \(describe(previous)): macOS switched to a reconnecting monitor")
+        return
+    }
+    HAL.setDefaultOutput(virtual)
+}
+
 /// Idempotent: called at launch and whenever devices, the default output or the display arrangement change.
-func reconcile() {
+func reconcile(deviceListChanged: Bool = false) {
+    if deviceListChanged { lastDeviceListChange = Date() }
     let virtual = HAL.device(uid: virtualUID)
     if virtual == nil { log("virtual device \(virtualUID) not installed") }
-    let monitors = Monitor.discover()
+    let hardware = currentHardwareSignature()
+    if hardware != hardwareSignature {
+        hardwareSignature = hardware
+        discoveredMonitors = Monitor.discover()
+    }
+    let monitors = discoveredMonitors
 
     // Rebuild only when the set of monitors, their audio devices or their left-to-right order changed.
     let signature = monitors.map { "\($0.port)/\($0.audioDevice ?? 0)/\($0.displayID ?? 0)" }.joined(separator: ",")
@@ -130,24 +188,19 @@ func reconcile() {
         menuBar?.update(monitors: connected)
     }
 
-    guard let virtual else { return }
+    guard let virtual else {
+        mediaKeys?.update(virtualIsDefault: false, monitorDisplays: Set(connected.compactMap(\.monitor.displayID)))
+        return
+    }
     if !playbackListenerInstalled {
         var addr = HAL.address(kAudioDevicePropertyDeviceIsRunningSomewhere)
         AudioObjectAddPropertyListenerBlock(virtual, &addr, .main) { _, _ in updatePlayback() }
         playbackListenerInstalled = true
     }
 
-    let monitorAudio = connected.compactMap(\.monitor.audioDevice)
-    if monitorAudio.isEmpty {
-        // Monitors unplugged: don't leave the system routed into a dead virtual device.
-        if HAL.defaultOutput == virtual, let speakers = findBuiltInSpeakers() {
-            HAL.setDefaultOutput(speakers)
-        }
-    } else if let current = HAL.defaultOutput, monitorAudio.contains(current) {
-        // macOS picked a monitor's raw (volume-less) output: route through the virtual device instead.
-        HAL.setDefaultOutput(virtual)
-        log("default output -> \(HAL.string(virtual, kAudioObjectPropertyName) ?? virtualUID)")
-    }
+    routeDefaultOutput(virtual: virtual, monitorAudio: connected.compactMap(\.monitor.audioDevice))
+    mediaKeys?.update(virtualIsDefault: HAL.defaultOutput == virtual,
+                      monitorDisplays: Set(connected.compactMap(\.monitor.displayID)))
     updatePlayback()
 }
 
@@ -168,10 +221,10 @@ var menuBar: MenuBar?
 /// library so rebuilding it doesn't change the signed app and its Accessibility grant.
 @_cdecl("agent_main")
 public func agentMain() {
-    for selector in [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultOutputDevice] {
-        var addr = HAL.address(selector)
-        AudioObjectAddPropertyListenerBlock(HAL.system, &addr, .main) { _, _ in reconcile() }
-    }
+    var devicesAddr = HAL.address(kAudioHardwarePropertyDevices)
+    AudioObjectAddPropertyListenerBlock(HAL.system, &devicesAddr, .main) { _, _ in reconcile(deviceListChanged: true) }
+    var defaultAddr = HAL.address(kAudioHardwarePropertyDefaultOutputDevice)
+    AudioObjectAddPropertyListenerBlock(HAL.system, &defaultAddr, .main) { _, _ in reconcile() }
 
     for sig in [SIGTERM, SIGINT] {
         signal(sig, SIG_IGN)
@@ -188,7 +241,7 @@ public func agentMain() {
     }
     // Monitors plugged in, unplugged or rearranged in System Settings > Displays.
     NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in
-        reconcile()
+        reconcile(deviceListChanged: true)
     }
     DistributedNotificationCenter.default().addObserver(forName: delaysChangedNotification, object: nil, queue: .main) { _ in
         applySpeakerDelays()

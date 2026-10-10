@@ -7,6 +7,11 @@ import CoreAudio
 /// - volume/mute keys, while the S2725QC virtual device is the default output;
 /// - brightness keys, for the external monitor under the mouse pointer.
 /// Anything else passes through to macOS untouched.
+///
+/// The event tap sees every key press, so it runs on its own thread and never waits on
+/// anything: it decides from a cached snapshot (`update`) and does the actual work afterwards
+/// on the main thread. A slow tap would make macOS drop key events, which loses the volume
+/// HUD for other outputs such as AirPods and delays typing.
 final class MediaKeys {
     static let step: Float32 = 0.02
     static let brightnessStep: Float32 = 1.0 / 16
@@ -15,6 +20,11 @@ final class MediaKeys {
     private let brightnessFor: (CGDirectDisplayID) -> MonitorBrightness?
     private let virtualUID: String
     private var tap: CFMachPort?
+
+    // Snapshot read by the tap thread, written by the main thread.
+    private let lock = NSLock()
+    private var virtualIsDefault = false
+    private var monitorDisplays: Set<CGDirectDisplayID> = []
 
     // NX_KEYTYPE_* from IOKit/hidsystem/ev_keymap.h
     private enum Key: Int {
@@ -28,9 +38,24 @@ final class MediaKeys {
         if !AXIsProcessTrustedWithOptions(options) {
             log("waiting for Accessibility permission to handle volume/brightness keys")
         }
-        installTap()
+        let thread = Thread { [unowned self] in
+            self.installTap()
+            CFRunLoopRun()
+        }
+        thread.name = "media keys"
+        thread.qualityOfService = .userInteractive
+        thread.start()
     }
 
+    /// Main thread: refreshes what the tap needs to decide whether a key is ours.
+    func update(virtualIsDefault: Bool, monitorDisplays: Set<CGDirectDisplayID>) {
+        lock.lock()
+        self.virtualIsDefault = virtualIsDefault
+        self.monitorDisplays = monitorDisplays
+        lock.unlock()
+    }
+
+    /// Runs on the tap thread.
     private func installTap() {
         let mask = CGEventMask(1 << 14) // NX_SYSDEFINED
             | CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << CGEventType.keyUp.rawValue)
@@ -38,19 +63,19 @@ final class MediaKeys {
             let keys = Unmanaged<MediaKeys>.fromOpaque(refcon!).takeUnretainedValue()
             return keys.handle(type: type, event: event)
         }
-        tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
-                                eventsOfInterest: mask, callback: callback,
-                                userInfo: Unmanaged.passUnretained(self).toOpaque())
-        guard let tap else {
-            // Not trusted yet; retry until the user grants Accessibility.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.installTap() }
-            return
+        while true {
+            tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                    eventsOfInterest: mask, callback: callback,
+                                    userInfo: Unmanaged.passUnretained(self).toOpaque())
+            if tap != nil { break }
+            Thread.sleep(forTimeInterval: 3) // not trusted yet; retry until Accessibility is granted
         }
-        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
+        CGEvent.tapEnable(tap: tap!, enable: true)
         log("media key handling active")
     }
 
+    /// Tap thread. Must return quickly and never block.
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
@@ -60,7 +85,7 @@ final class MediaKeys {
         if type == .keyDown || type == .keyUp {
             let code = event.getIntegerValueField(.keyboardEventKeycode)
             guard code == 144 || code == 145 else { return Unmanaged.passUnretained(event) }
-            let handled = handleBrightness(up: code == 144, isDown: type == .keyDown, fine: Self.isFine(event.flags))
+            let handled = brightness(up: code == 144, isDown: type == .keyDown, fine: Self.isFine(event.flags), at: event.location)
             return handled ? nil : Unmanaged.passUnretained(event)
         }
         guard let ns = NSEvent(cgEvent: event), ns.subtype.rawValue == 8 else { return Unmanaged.passUnretained(event) }
@@ -73,16 +98,34 @@ final class MediaKeys {
         let handled: Bool
         switch key {
         case .soundUp, .soundDown, .mute:
-            handled = handleVolume(key, isDown: isDown)
+            handled = volume(key, isDown: isDown)
         case .brightnessUp, .brightnessDown:
-            handled = handleBrightness(up: key == .brightnessUp, isDown: isDown, fine: Self.isFine(event.flags))
+            handled = brightness(up: key == .brightnessUp, isDown: isDown, fine: Self.isFine(event.flags), at: event.location)
         }
         return handled ? nil : Unmanaged.passUnretained(event)
     }
 
-    private func handleVolume(_ key: Key, isDown: Bool) -> Bool {
-        guard let device = HAL.device(uid: virtualUID), HAL.defaultOutput == device else { return false }
-        guard isDown else { return true }
+    /// Tap thread: claims the key if the virtual device is the output; the change happens on main.
+    private func volume(_ key: Key, isDown: Bool) -> Bool {
+        lock.lock(); let ours = virtualIsDefault; lock.unlock()
+        guard ours else { return false }
+        if isDown { DispatchQueue.main.async { self.applyVolume(key) } }
+        return true
+    }
+
+    /// Tap thread: claims the key if the pointer is on a DDC monitor; the change happens on main.
+    private func brightness(up: Bool, isDown: Bool, fine: Bool, at point: CGPoint) -> Bool {
+        var display = CGDirectDisplayID(0)
+        var count: UInt32 = 0
+        CGGetDisplaysWithPoint(point, 1, &display, &count)
+        lock.lock(); let ours = count > 0 && monitorDisplays.contains(display); lock.unlock()
+        guard ours else { return false }
+        if isDown { DispatchQueue.main.async { self.applyBrightness(up: up, fine: fine, display: display) } }
+        return true
+    }
+
+    private func applyVolume(_ key: Key) {
+        guard let device = HAL.device(uid: virtualUID) else { return }
         let volumeAddr = HAL.address(kAudioDevicePropertyVolumeScalar, kAudioObjectPropertyScopeOutput)
         let muteAddr = HAL.address(kAudioDevicePropertyMute, kAudioObjectPropertyScopeOutput)
         var volume = HAL.get(device, volumeAddr, Float32(0)) ?? 0
@@ -98,16 +141,12 @@ final class MediaKeys {
         }
         HAL.set(device, muteAddr, UInt32(muted ? 1 : 0))
         OSD.show(muted ? .muted : .volume, level: muted ? 0 : volume, on: OSD.displayUnderCursor)
-        return true
     }
 
-    private func handleBrightness(up: Bool, isDown: Bool, fine: Bool) -> Bool {
-        let display = OSD.displayUnderCursor
-        guard let brightness = brightnessFor(display) else { return false }
-        guard isDown else { return true }
+    private func applyBrightness(up: Bool, fine: Bool, display: CGDirectDisplayID) {
+        guard let brightness = brightnessFor(display) else { return }
         brightness.set(Self.stepped(brightness.value, by: fine ? Self.fineBrightnessStep : Self.brightnessStep, up: up))
         OSD.show(.brightness, level: brightness.value, on: display, chiclets: fine ? 64 : 16)
-        return true
     }
 
     private static func isFine(_ flags: CGEventFlags) -> Bool {
